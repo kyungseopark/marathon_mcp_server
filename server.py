@@ -1,4 +1,5 @@
-# marathon_server.py
+# marathon_server_agent.py
+# AI Agent 전용 - JSON만 반환
 # type: ignore
 from fastmcp import FastMCP
 import httpx
@@ -22,7 +23,7 @@ async def fetch_detail(client: httpx.AsyncClient, detail_url: str, base_domain: 
     """정적 단일 마라톤 상세 정보 가져오기"""
     try:
         full_url = base_domain + detail_url if not detail_url.startswith('http') else detail_url
-        response = await client.get(full_url, timeout= 15.0)
+        response = await client.get(full_url, timeout=15.0)
         response.raise_for_status()
 
         html = response.text
@@ -73,79 +74,6 @@ def is_accepting_applications(marathon: dict) -> bool:
     except:
         return False
 
-def format_marathon_info(marathon: dict, include_contact: bool = True) -> str:
-    """마라톤 정보를 보기 좋게 포맷팅"""
-    lines = []
-    
-    # 기본 정보
-    lines.append(f"🏃 {marathon.get('마라톤명', '정보 없음')}")
-    
-    # 트랙 정보
-    tracks = marathon.get('트랙', [])
-    if tracks:
-        tracks_str = ', '.join([t.strip() for t in tracks if t.strip()])
-        lines.append(f"📏 트랙: {tracks_str}")
-    
-    # 날짜 및 장소
-    race_date = marathon.get('날짜', '')
-    if race_date:
-        lines.append(f"📅 날짜: {race_date}")
-    
-    gathering_time = marathon.get('집결시간', '')
-    if gathering_time:
-        lines.append(f"⏰ {gathering_time}")
-    
-    location = marathon.get('지역', '')
-    place = marathon.get('장소', '')
-    if location or place:
-        loc_str = f"{location} - {place}" if location and place else (location or place)
-        lines.append(f"📍 장소: {loc_str}")
-    
-    # 접수 기간
-    app_period = marathon.get('접수기간', {})
-    start_date = app_period.get('시작일', '')
-    end_date = app_period.get('종료일', '')
-    
-    if start_date and end_date:
-        is_open = is_accepting_applications(marathon)
-        status = "✅ 접수 중" if is_open else "❌ 접수 마감"
-        lines.append(f"📝 접수기간: {start_date} ~ {end_date} ({status})")
-    elif end_date:
-        is_open = is_accepting_applications(marathon)
-        status = "✅ 접수 중" if is_open else "❌ 접수 마감"
-        lines.append(f"📝 접수 마감: {end_date} ({status})")
-    
-    # 문의처 (요청 시에만)
-    if include_contact:
-        contact = marathon.get('문의처', {})
-        email = contact.get('이메일', '')
-        phone = contact.get('전화번호', '')
-        
-        if email or phone:
-            lines.append("📞 문의처:")
-            if email:
-                lines.append(f"   ✉️ {email}")
-            if phone:
-                lines.append(f"   📱 {phone}")
-    
-    # 주최
-    host = marathon.get('주최', '')
-    if host:
-        lines.append(f"🏢 주최: {host}")
-    
-    # 홈페이지
-    homepage = marathon.get('홈페이지', '')
-    if homepage:
-        lines.append(f"🔗 {homepage}")
-    
-    # 소개
-    intro = marathon.get('소개', '')
-    if intro and len(intro) > 10:
-        intro_short = intro[:100] + '...' if len(intro) > 100 else intro
-        lines.append(f"ℹ️ {intro_short}")
-    
-    return '\n'.join(lines)
-
 async def crawl_marathons_fast(base_url: str, base_domain: str, max_concurrent: int = 10) -> list:
     """병렬 처리로 빠르게 크롤링"""
     all_marathons = []
@@ -167,7 +95,7 @@ async def crawl_marathons_fast(base_url: str, base_domain: str, max_concurrent: 
                     detail_urls.append(href)
             
             if not detail_urls:
-                print("경고: 상세 페이지 링크를 찾지 못했습니다. (사이트 구조 변경 가능성)", file=sys.stderr)
+                print("경고: 상세 페이지 링크를 찾지 못했습니다.", file=sys.stderr)
                 return []
             
             # 2. 병렬로 상세 페이지 크롤링
@@ -184,9 +112,9 @@ async def crawl_marathons_fast(base_url: str, base_domain: str, max_concurrent: 
             all_marathons = [r for r in results if r and not isinstance(r, Exception)]
             
         except httpx.HTTPStatusError as e:
-            print(f"HTTP 오류 발생 : {e.response.status_code} - {e.request.url}", file=sys.stderr)
+            print(f"HTTP 오류: {e.response.status_code}", file=sys.stderr)
         except Exception as e:
-            print(f"크롤링 중 알 수 없는 오류 발생 : {e}", file=sys.stderr)
+            print(f"크롤링 오류: {e}", file=sys.stderr)
     
     return all_marathons
 
@@ -199,106 +127,274 @@ def is_cache_valid() -> bool:
     return elapsed.total_seconds() < _cache['ttl']
 
 @mcp.tool()
-async def crawl_korean_marathons(
-    base_url: str = "https://marathongo.co.kr/races",
-    base_domain: str = "https://marathongo.co.kr",
-    region_filter: str = "",
-    date_filter: str = "",
+async def search_marathons(
+    region: str = "",
+    date: str = "",
     only_accepting: bool = False,
     use_cache: bool = True
 ) -> str:
     """
-    한국의 마라톤 대회 정보를 크롤링하여 상세 정보를 가져옵니다.
-    
-    병렬 처리로 빠르게 크롤링하며, 1시간 동안 결과를 캐싱합니다.
+    한국의 마라톤 대회 정보를 검색합니다.
     
     Args:
-        base_url: 크롤링할 마라톤 목록 페이지의 URL (기본값: 마라톤GO)
-        base_domain: 웹사이트의 기본 도메인 URL
-        region_filter: 특정 지역 필터링 (예: '서울', '경기', '부산'). 비워두면 전체 검색
-        date_filter: 특정 날짜/월 필터링 (예: '2025-11', '2025-11-15'). 비워두면 전체 검색
-        only_accepting: True일 경우 현재 접수 가능한 대회만 반환 (기본값: False)
-        use_cache: 캐시 사용 여부 (기본값: True)
+        region: 지역 필터 (예: '서울', '경기', '부산')
+        date: 날짜 필터 (예: '2025-11', '2025-11-15')
+        only_accepting: 접수 가능한 대회만 반환
+        use_cache: 캐시 사용 여부
     
     Returns:
-        포맷팅된 마라톤 정보 목록
-        
-    수집 정보:
-        - 마라톤명, 트랙 종류 (10km, 5km 등)
-        - 개최 지역 및 장소, 대회 날짜, 집결 시간
-        - 접수 기간 (시작일, 종료일) 및 접수 가능 여부
-        - 문의처 (이메일, 전화번호)
-        - 주최 기관, 홈페이지, 대회 소개
-    
-    사용 예시:
-        - "2025년 11월에 있는 마라톤 알려줘"
-        - "서울에서 하는 마라톤 찾아줘"
-        - "지금 신청할 수 있는 마라톤 있어?"
-        - "이번 주말 마라톤 대회 있어?"
+        JSON 형식의 마라톤 정보
+        {
+            "success": true,
+            "total": 5,
+            "filters": {...},
+            "marathons": [
+                {
+                    "마라톤명": "...",
+                    "트랙": ["10km", "5km"],
+                    "지역": "서울",
+                    "장소": "...",
+                    "날짜": "2025-11-20",
+                    "집결시간": "07:00",
+                    "접수기간": {"시작일": "...", "종료일": "..."},
+                    "문의처": {"이메일": "...", "전화번호": "..."},
+                    "주최": "...",
+                    "홈페이지": "...",
+                    "소개": "...",
+                    "상세URL": "...",
+                    "접수가능여부": true
+                }
+            ]
+        }
     """
     
     # 캐시 확인
     if use_cache and is_cache_valid():
         results = _cache['data']
     else:
-        print("Fetching new data", file=sys.stderr)
-        results = await crawl_marathons_fast(base_url, base_domain, max_concurrent=10)
+        results = await crawl_marathons_fast(
+            "https://marathongo.co.kr/races",
+            "https://marathongo.co.kr",
+            max_concurrent=10
+        )
         if results:
             _cache['data'] = results
             _cache['timestamp'] = datetime.now()
-            print(f"데이터 {len(results)}개 로드 및 캐시 저장", file=sys.stderr)
         else:
-            print("Data fetch failed", file=sys.stderr)
-        
-    # 필터링 적용
-    filtered_results = results
+            return json.dumps({
+                "success": False,
+                "total": 0,
+                "error": "데이터를 가져올 수 없습니다",
+                "marathons": []
+            }, ensure_ascii=False)
     
-    if region_filter:
-        filtered_results = [m for m in filtered_results if region_filter in m.get('지역', '')]
+    # 필터링
+    filtered = results
     
-    if date_filter:
-        filtered_results = [m for m in filtered_results if date_filter in m.get('날짜', '')]
+    if region:
+        filtered = [m for m in filtered if region in m.get('지역', '')]
+    
+    if date:
+        filtered = [m for m in filtered if date in m.get('날짜', '')]
     
     if only_accepting:
-        filtered_results = [m for m in filtered_results if is_accepting_applications(m)]
+        filtered = [m for m in filtered if is_accepting_applications(m)]
     
     # 날짜순 정렬
-    filtered_results.sort(key=lambda x: x.get('날짜', '9999-99-99'))
+    filtered.sort(key=lambda x: x.get('날짜', '9999-99-99'))
     
-    # 결과 포맷팅
-    if not filtered_results:
-        message = "현재 접수 가능한 마라톤이 없습니다." if only_accepting else "검색 조건에 맞는 마라톤을 찾지 못했습니다."
-        return f"❌ {message}\n\n💡 팁: 다른 지역이나 날짜로 검색해보세요."
+    # 접수가능여부 필드 추가
+    marathons_with_status = []
+    for marathon in filtered:
+        m = marathon.copy()
+        m['접수가능여부'] = is_accepting_applications(marathon)
+        marathons_with_status.append(m)
     
-    # 마라톤 정보 포맷팅
-    formatted_list = []
-    for i, marathon in enumerate(filtered_results, 1):
-        formatted = format_marathon_info(marathon, include_contact=True)
-        formatted_list.append(f"\n{'='*50}\n[{i}] {formatted}\n{'='*50}")
-    
-    header = f"✅ 총 {len(filtered_results)}개의 마라톤을 찾았습니다"
-    if only_accepting:
-        header += " (접수 가능한 대회만)"
-    header += "\n"
-    
-    footer = "\n\n💡 특정 마라톤의 상세 정보가 필요하시면 말씀해주세요!"
-    
-    return header + '\n'.join(formatted_list) + footer
+    # JSON 반환
+    return json.dumps({
+        "success": len(marathons_with_status) > 0,
+        "total": len(marathons_with_status),
+        "filters": {
+            "region": region if region else None,
+            "date": date if date else None,
+            "only_accepting": only_accepting
+        },
+        "marathons": marathons_with_status
+    }, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
-async def clear_marathon_cache() -> str:
+async def get_marathon_by_name(name: str, use_cache: bool = True) -> str:
     """
-    마라톤 데이터 캐시를 삭제합니다.
-    최신 정보가 필요할 때 사용하세요.
+    마라톤 이름으로 검색합니다 (부분 일치).
+    
+    Args:
+        name: 검색할 마라톤 이름
+        use_cache: 캐시 사용 여부
     
     Returns:
-        캐시 삭제 결과 메시지
+        JSON 형식의 마라톤 정보
+    """
+    
+    # 캐시 확인
+    if use_cache and is_cache_valid():
+        results = _cache['data']
+    else:
+        results = await crawl_marathons_fast(
+            "https://marathongo.co.kr/races",
+            "https://marathongo.co.kr",
+            max_concurrent=10
+        )
+        if results:
+            _cache['data'] = results
+            _cache['timestamp'] = datetime.now()
+    
+    # 이름 검색 (대소문자 무시)
+    matched = [m for m in results if name.lower() in m.get('마라톤명', '').lower()]
+    
+    if not matched:
+        return json.dumps({
+            "success": False,
+            "message": f"'{name}'을 찾을 수 없습니다",
+            "marathon": None
+        }, ensure_ascii=False)
+    
+    # 첫 번째 결과 반환
+    marathon = matched[0].copy()
+    marathon['접수가능여부'] = is_accepting_applications(marathon)
+    
+    result = {
+        "success": True,
+        "total_matches": len(matched),
+        "marathon": marathon
+    }
+    
+    # 여러 개 매칭되면 목록 추가
+    if len(matched) > 1:
+        result['other_matches'] = [
+            {"마라톤명": m.get('마라톤명'), "날짜": m.get('날짜')}
+            for m in matched[1:]
+        ]
+    
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def get_upcoming_marathons(days: int = 30, use_cache: bool = True) -> str:
+    """
+    앞으로 N일 이내의 마라톤을 조회합니다.
+    
+    Args:
+        days: 조회 기간 (일)
+        use_cache: 캐시 사용 여부
+    
+    Returns:
+        JSON 형식의 마라톤 목록 (D-day 포함)
+    """
+    
+    # 캐시 확인
+    if use_cache and is_cache_valid():
+        results = _cache['data']
+    else:
+        results = await crawl_marathons_fast(
+            "https://marathongo.co.kr/races",
+            "https://marathongo.co.kr",
+            max_concurrent=10
+        )
+        if results:
+            _cache['data'] = results
+            _cache['timestamp'] = datetime.now()
+    
+    # 날짜 필터링
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = today + timedelta(days=days)
+    
+    upcoming = []
+    for marathon in results:
+        try:
+            race_date_str = marathon.get('날짜', '')
+            if race_date_str:
+                race_date = datetime.strptime(race_date_str, '%Y-%m-%d')
+                if today <= race_date <= end_date:
+                    m = marathon.copy()
+                    m['접수가능여부'] = is_accepting_applications(marathon)
+                    m['D-day'] = (race_date - today).days
+                    upcoming.append(m)
+        except:
+            continue
+    
+    # D-day 순 정렬
+    upcoming.sort(key=lambda x: x.get('D-day', 999))
+    
+    return json.dumps({
+        "success": len(upcoming) > 0,
+        "total": len(upcoming),
+        "period_days": days,
+        "marathons": upcoming
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def get_marathons_by_track(track: str, use_cache: bool = True) -> str:
+    """
+    특정 트랙 종류의 마라톤을 검색합니다.
+    
+    Args:
+        track: 트랙 종류 (예: '5km', '10km', '하프', '풀코스')
+        use_cache: 캐시 사용 여부
+    
+    Returns:
+        JSON 형식의 마라톤 목록
+    """
+    
+    # 캐시 확인
+    if use_cache and is_cache_valid():
+        results = _cache['data']
+    else:
+        results = await crawl_marathons_fast(
+            "https://marathongo.co.kr/races",
+            "https://marathongo.co.kr",
+            max_concurrent=10
+        )
+        if results:
+            _cache['data'] = results
+            _cache['timestamp'] = datetime.now()
+    
+    # 트랙 필터링
+    matched = []
+    for marathon in results:
+        tracks = marathon.get('트랙', [])
+        if any(track.lower() in t.lower() for t in tracks):
+            m = marathon.copy()
+            m['접수가능여부'] = is_accepting_applications(marathon)
+            matched.append(m)
+    
+    # 날짜순 정렬
+    matched.sort(key=lambda x: x.get('날짜', '9999-99-99'))
+    
+    return json.dumps({
+        "success": len(matched) > 0,
+        "total": len(matched),
+        "track_filter": track,
+        "marathons": matched
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def clear_cache() -> str:
+    """
+    캐시를 삭제합니다.
+    
+    Returns:
+        JSON 형식의 결과
     """
     _cache['data'] = None
     _cache['timestamp'] = None
     
-    return "✅ 캐시가 삭제되었습니다. 다음 검색 시 최신 데이터를 가져옵니다."
+    return json.dumps({
+        "success": True,
+        "message": "캐시가 삭제되었습니다"
+    }, ensure_ascii=False)
 
 
 if __name__ == "__main__":
